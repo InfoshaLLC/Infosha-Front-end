@@ -1,0 +1,38 @@
+{
+  "project_info": {
+    "project_number": "433736022013",
+    "project_id": "infosha-2f58f",
+    "storage_bucket": "infosha-2f58f.appspot.com"
+  },
+  "client": [
+    {
+      "client_info": {
+        "mobilesdk_app_id": "1:433736022013:android:cdfd7e6554b61305bc0b94",
+        "android_client_info": {
+          "package_name": "com.ktech.infosha"
+        }
+      },
+      "oauth_client": [
+        {
+          "client_id": "433736022013-gvcfgdprfhoneblfbmo260bc33gfsfth.apps.googleusercontent.com",
+          "client_type": 1,
+          "android_info": {
+            "package_name": "com.ktech.infosha",
+            "certificate_hash": "a7769abac064afc8f1e9088c979a7c10c4cd1193"
+          }
+        }
+      ],
+      "api_key": [
+        {
+          "current_key": "AIzaSyA6EeVOp75D8-nj_IXQC6C8ZB1GmDEq0_g"
+        }
+      ],
+      "services": {
+        "appinvite_service": {
+          "other_platform_oauth_client": []
+        }
+      }
+    }
+  ],
+  "configuration_version": "1"
+}

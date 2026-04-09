@@ -1,3 +1,6 @@
+# Secrets / local config
+lib/config/gmailauth.json
+
 # Miscellaneous
 *.class
 *.lock

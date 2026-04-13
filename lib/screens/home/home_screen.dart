@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'package:get/get.dart';
 import 'package:infosha/main.dart';
 import 'package:shimmer/shimmer.dart';
@@ -53,13 +54,20 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
   ScrollController scrollController = ScrollController();
   int visibleTextIndex = -1;
 
+  // Auto-refresh timer
+  Timer? _refreshTimer;
+  static const _refreshInterval = Duration(minutes: 2);
+  static const _topThreshold = 200.0;
+
   @override
   void initState() {
     super.initState(); // Always call super.initState() first
     WidgetsBinding.instance.addObserver(this);
     provider = Provider.of<UserViewModel>(context, listen: false);
     providerFeed = Provider.of<FeedModel>(context, listen: false);
-    Future.microtask(() => context.read<FeedModel>().fetchPosts());
+    if (providerFeed.feedListModel.data?.data == null || providerFeed.feedListModel.data!.data!.isEmpty) {
+      Future.microtask(() => context.read<FeedModel>().fetchPosts());
+    }
     if (!widget.fromLogin) {
       Future.microtask(() async {
         await provider.fetchDeviceContacts();
@@ -94,6 +102,7 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
     // getProfileData();
 
     scrollController.addListener(_scrollListener);
+    _startRefreshTimer();
   }
 
   Future<void> deeplinkemthod() async {
@@ -126,8 +135,36 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
     }
   }
 
+  void _startRefreshTimer() {
+    _refreshTimer?.cancel();
+    _refreshTimer = Timer.periodic(_refreshInterval, _onRefreshTick);
+  }
+
+  void _onRefreshTick(Timer timer) {
+    if (!mounted) return;
+    if (!providerFeed.isHomeScreenVisible) return;
+
+    final isAtTop = scrollController.hasClients &&
+        scrollController.position.pixels < _topThreshold;
+
+    if (isAtTop) {
+      debugPrint('Auto-refresh: user at top → silent refresh');
+      providerFeed.setHasNewPosts(false);
+      providerFeed.fetchPosts(isEvent: true);
+    } else {
+      debugPrint('Auto-refresh: user scrolled down → showing banner');
+      providerFeed.setHasNewPosts(true);
+    }
+  }
+
   /// used to fetch more data if pagination added
   void _scrollListener() {
+    // Auto-dismiss "New posts" banner when user scrolls to top
+    if (scrollController.position.pixels < _topThreshold && providerFeed.hasNewPosts) {
+      providerFeed.setHasNewPosts(false);
+      providerFeed.fetchPosts(isEvent: true);
+    }
+
     if (scrollController.position.pixels >= scrollController.position.maxScrollExtent - 100 && !isLoadingMorePost) {
       setState(() {
         isLoadingMorePost = true;
@@ -143,17 +180,21 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
 
   @override
   void dispose() {
+    _refreshTimer?.cancel();
     WidgetsBinding.instance.removeObserver(this);
     scrollController.removeListener(_scrollListener);
     scrollController.dispose();
-    providerFeed.clearFeedData();
+    // providerFeed.clearFeedData();
     // page = 1;
     super.dispose();
   }
 
   @override
   void didChangeAppLifecycleState(AppLifecycleState state) async {
-    if (state == AppLifecycleState.resumed) {
+    if (state == AppLifecycleState.paused) {
+      _refreshTimer?.cancel();
+    } else if (state == AppLifecycleState.resumed) {
+      _startRefreshTimer();
       debugPrint("App resumed → Checking contacts…");
       bool changed = await provider.hasDeviceContactsChanged();
       if (changed) {
@@ -192,7 +233,9 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
                         color: baseColor,
                       ),
                     )
-                  : RefreshIndicator(
+                  : Stack(
+                      children: [
+                        RefreshIndicator(
                       color: baseColor,
                       edgeOffset: Get.height * 0.55,
                       onRefresh: () async {
@@ -475,6 +518,65 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
                           ),
                         ],
                       ),
+                    ),
+                        // "New posts" floating banner
+                        Consumer<FeedModel>(
+                          builder: (context, feedProvider, child) {
+                            return AnimatedPositioned(
+                              duration: const Duration(milliseconds: 300),
+                              curve: Curves.easeOut,
+                              top: feedProvider.hasNewPosts
+                                  ? (Get.height * 0.41 + 10).toDouble()
+                                  : -60.0,
+                              left: 0,
+                              right: 0,
+                              child: Center(
+                                child: GestureDetector(
+                                  onTap: () {
+                                    providerFeed.setHasNewPosts(false);
+                                    scrollController.animateTo(
+                                      0,
+                                      duration: const Duration(milliseconds: 300),
+                                      curve: Curves.easeOut,
+                                    ).then((_) {
+                                      providerFeed.fetchPosts(isEvent: true);
+                                    });
+                                  },
+                                  child: Container(
+                                    padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+                                    decoration: BoxDecoration(
+                                      color: Colors.black87,
+                                      borderRadius: BorderRadius.circular(20),
+                                      boxShadow: const [
+                                        BoxShadow(
+                                          color: Colors.black26,
+                                          blurRadius: 6,
+                                          offset: Offset(0, 2),
+                                        ),
+                                      ],
+                                    ),
+                                    child: Row(
+                                      mainAxisSize: MainAxisSize.min,
+                                      children: [
+                                        const Icon(Icons.arrow_upward, color: Colors.white, size: 16),
+                                        const SizedBox(width: 6),
+                                        Text(
+                                          'New posts'.tr,
+                                          style: const TextStyle(
+                                            color: Colors.white,
+                                            fontSize: 13,
+                                            fontWeight: FontWeight.w600,
+                                          ),
+                                        ),
+                                      ],
+                                    ),
+                                  ),
+                                ),
+                              ),
+                            );
+                          },
+                        ),
+                      ],
                     ),
             );
           },

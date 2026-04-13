@@ -491,9 +491,9 @@ class _MyAppState extends State<MyApp> with SingleTickerProviderStateMixin, Widg
       // The app is in the background. Release memory.
       debugPrint("App is paused. Releasing memory-intensive resources.");
 
-      // 1. Clear data from your FeedModel
-      _feedModel.clearFeedData();
-      _feedModel.page = 1;
+      // 1. Keep feed data in memory (don't clear — show cached data on resume)
+      // _feedModel.clearFeedData();
+      // _feedModel.page = 1;
 
       // 2. Clear Flutter's global image cache
       PaintingBinding.instance.imageCache.clear();
@@ -516,9 +516,9 @@ class _MyAppState extends State<MyApp> with SingleTickerProviderStateMixin, Widg
         debugPrint("Resuming from another screen. No navigation action taken.");
       }
     } else if (state == AppLifecycleState.resumed) {
-      // The app has returned to the foreground.
+      // The app has returned to the foreground — silent refresh (no loading spinner).
       debugPrint("App is resumed.");
-      _feedModel.fetchPosts();
+      _feedModel.fetchPosts(isEvent: true);
     }
   }
 }

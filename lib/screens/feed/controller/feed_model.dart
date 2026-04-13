@@ -23,6 +23,7 @@ class FeedModel extends ChangeNotifier {
   bool isHomeScreenVisible = false;
   bool isProfileScreenVisible = false;
   bool isOtherProfileScreenVisible = false;
+  bool hasNewPosts = false;
   int page = 1;
 
   FeedListModel feedListModel = FeedListModel();
@@ -82,6 +83,11 @@ class FeedModel extends ChangeNotifier {
     viewFeedListModel = FeedListModel();
     debugPrint("View feed data cleared from memory.");
     // No need to notify listeners as this is called on dispose.
+  }
+
+  void setHasNewPosts(bool value) {
+    hasNewPosts = value;
+    notifyListeners();
   }
 
   Future fetchPosts({bool isEvent = false}) async {

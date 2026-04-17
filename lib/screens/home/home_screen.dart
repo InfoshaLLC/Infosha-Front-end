@@ -53,10 +53,11 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
   late FeedModel providerFeed;
   ScrollController scrollController = ScrollController();
   int visibleTextIndex = -1;
+  bool _bannerTapInProgress = false;
 
   // Auto-refresh timer
   Timer? _refreshTimer;
-  static const _refreshInterval = Duration(minutes: 2);
+  static const _refreshInterval = Duration(minutes: 1);
   static const _topThreshold = 200.0;
 
   @override
@@ -66,7 +67,12 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
     provider = Provider.of<UserViewModel>(context, listen: false);
     providerFeed = Provider.of<FeedModel>(context, listen: false);
     if (providerFeed.feedListModel.data?.data == null || providerFeed.feedListModel.data!.data!.isEmpty) {
-      Future.microtask(() => context.read<FeedModel>().fetchPosts());
+      // Load cached feed from disk first (instant), then refresh from network
+      Future.microtask(() async {
+        final hadCache = await providerFeed.loadCachedFeed();
+        // Always fetch fresh data from network (silently if cache was loaded)
+        providerFeed.fetchPosts(isEvent: hadCache);
+      });
     }
     if (!widget.fromLogin) {
       Future.microtask(() async {
@@ -144,28 +150,41 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
     if (!mounted) return;
     if (!providerFeed.isHomeScreenVisible) return;
 
-    final isAtTop = scrollController.hasClients &&
-        scrollController.position.pixels < _topThreshold;
+    debugPrint('Auto-refresh tick fired — checking for new posts...');
 
-    if (isAtTop) {
-      debugPrint('Auto-refresh: user at top → silent refresh');
-      providerFeed.setHasNewPosts(false);
-      providerFeed.fetchPosts(isEvent: true);
-    } else {
-      debugPrint('Auto-refresh: user scrolled down → showing banner');
-      providerFeed.setHasNewPosts(true);
-    }
+    providerFeed.checkForNewPosts().then((hasNew) {
+      if (!mounted) return;
+      if (!hasNew) {
+        debugPrint('Auto-refresh: no new posts found');
+        return;
+      }
+
+      final isAtTop = scrollController.hasClients &&
+          scrollController.position.pixels < _topThreshold;
+
+      if (isAtTop) {
+        debugPrint('Auto-refresh: new posts found, user at top → silent refresh');
+        providerFeed.applyNewPosts();
+      } else {
+        debugPrint('Auto-refresh: new posts found, user scrolled down → showing banner');
+        providerFeed.setHasNewPosts(true);
+      }
+    });
   }
 
   /// used to fetch more data if pagination added
   void _scrollListener() {
     // Auto-dismiss "New posts" banner when user scrolls to top
-    if (scrollController.position.pixels < _topThreshold && providerFeed.hasNewPosts) {
-      providerFeed.setHasNewPosts(false);
-      providerFeed.fetchPosts(isEvent: true);
+    if (scrollController.position.pixels < _topThreshold && providerFeed.hasNewPosts && !_bannerTapInProgress) {
+      providerFeed.page = 1;
+      providerFeed.applyNewPosts();
     }
 
-    if (scrollController.position.pixels >= scrollController.position.maxScrollExtent - 100 && !isLoadingMorePost) {
+    if (scrollController.position.pixels >= scrollController.position.maxScrollExtent - 800 && !isLoadingMorePost) {
+      // Don't fetch beyond the last page
+      final lastPage = providerFeed.feedListModel.data?.lastPage ?? 1;
+      if (providerFeed.page >= lastPage) return;
+
       setState(() {
         isLoadingMorePost = true;
       });
@@ -500,14 +519,7 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
                                     //     ),
                                     //   );
                                     // }
-                                    else if (isLoadingMorePost) {
-                                      return const Padding(
-                                        padding: EdgeInsets.symmetric(vertical: 24),
-                                        child: Center(
-                                          child: DancingDotsLoader(),
-                                        ),
-                                      );
-                                    } else {
+                                    else {
                                       return const SizedBox.shrink();
                                     }
                                   },
@@ -533,14 +545,16 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
                               child: Center(
                                 child: GestureDetector(
                                   onTap: () {
-                                    providerFeed.setHasNewPosts(false);
+                                    _bannerTapInProgress = true;
+                                    providerFeed.page = 1;
                                     scrollController.animateTo(
                                       0,
                                       duration: const Duration(milliseconds: 300),
                                       curve: Curves.easeOut,
                                     ).then((_) {
-                                      providerFeed.fetchPosts(isEvent: true);
+                                      _bannerTapInProgress = false;
                                     });
+                                    providerFeed.applyNewPosts();
                                   },
                                   child: Container(
                                     padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),

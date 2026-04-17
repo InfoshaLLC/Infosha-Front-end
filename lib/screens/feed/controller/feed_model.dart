@@ -3,6 +3,7 @@ import 'dart:convert';
 import 'package:get/get.dart';
 import 'package:flutter/material.dart';
 import 'package:http/http.dart' as http;
+import 'package:shared_preferences/shared_preferences.dart';
 import 'package:infosha/config/const.dart';
 import 'package:infosha/views/app_icons.dart';
 import 'package:infosha/views/ui_helpers.dart';
@@ -14,6 +15,8 @@ import 'package:infosha/screens/feed/model/feed_vote_model.dart';
 import 'package:infosha/screens/feed/model/feed_reaction_model.dart';
 
 class FeedModel extends ChangeNotifier {
+  static const _feedCacheKey = 'cached_feed_json';
+
   bool isUploading = false;
   bool isLoading = true;
   bool isViewLoading = false;
@@ -24,12 +27,46 @@ class FeedModel extends ChangeNotifier {
   bool isProfileScreenVisible = false;
   bool isOtherProfileScreenVisible = false;
   bool hasNewPosts = false;
+  DateTime? _lastFetchStartTime;
+  FeedListModel? _cachedNewFeed;
   int page = 1;
 
   FeedListModel feedListModel = FeedListModel();
   FeedListModel viewFeedListModel = FeedListModel();
   FeedVoteModel feedVoteModel = FeedVoteModel();
   FeedReactionModel feedReactionModel = FeedReactionModel();
+
+  /// Saves the current feed JSON to disk for instant startup.
+  Future<void> _saveFeedToCache(String rawJson) async {
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      await prefs.setString(_feedCacheKey, rawJson);
+      debugPrint('Feed cache saved (${rawJson.length} chars)');
+    } catch (e) {
+      debugPrint('Failed to save feed cache: $e');
+    }
+  }
+
+  /// Loads cached feed from disk. Returns true if cache was loaded.
+  Future<bool> loadCachedFeed() async {
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      final cached = prefs.getString(_feedCacheKey);
+      if (cached != null && cached.isNotEmpty) {
+        final decoded = jsonDecode(cached);
+        feedListModel = FeedListModel.fromJson(decoded);
+        if (feedListModel.data?.data != null && feedListModel.data!.data!.isNotEmpty) {
+          isLoading = false;
+          notifyListeners();
+          debugPrint('Feed loaded from cache (${feedListModel.data!.data!.length} items)');
+          return true;
+        }
+      }
+    } catch (e) {
+      debugPrint('Failed to load feed cache: $e');
+    }
+    return false;
+  }
 
   Future addPost(String? description, XFile? file) async {
     try {
@@ -90,8 +127,69 @@ class FeedModel extends ChangeNotifier {
     notifyListeners();
   }
 
+  /// Returns the ID of the newest feed currently loaded, or null.
+  int? get _currentTopFeedId {
+    final items = feedListModel.data?.data;
+    if (items != null && items.isNotEmpty) return items.first.id;
+    return null;
+  }
+
+  /// Fetches page 1 and checks if the top feed ID differs from the current one.
+  /// Caches the result so the banner tap can apply it instantly.
+  /// Returns true if there are new posts.
+  Future<bool> checkForNewPosts() async {
+    if (Params.UserToken == "") return false;
+    try {
+      var headers = {'Authorization': 'Bearer ${Params.UserToken}'};
+      var request = http.Request('GET', Uri.parse("${ApiEndPoints.feed}?page=1"));
+      request.headers.addAll(headers);
+      http.StreamedResponse response = await request.send();
+      var result = await http.Response.fromStream(response);
+      if (response.statusCode == 200) {
+        final decodeData = jsonDecode(result.body);
+        final newModel = FeedListModel.fromJson(decodeData);
+        final newTopId = newModel.data?.data?.isNotEmpty == true ? newModel.data!.data!.first.id : null;
+        final oldTopId = _currentTopFeedId;
+        debugPrint('checkForNewPosts: oldTopId=$oldTopId, newTopId=$newTopId');
+        if (newTopId != null && oldTopId != null && newTopId != oldTopId) {
+          _cachedNewFeed = newModel;
+          return true;
+        }
+      }
+    } catch (e) {
+      debugPrint('checkForNewPosts error: $e');
+    }
+    return false;
+  }
+
+  /// Applies cached new-posts data instantly (no network call).
+  /// Falls back to fetchPosts if cache is empty.
+  void applyNewPosts() {
+    if (_cachedNewFeed != null) {
+      debugPrint('applyNewPosts: using cached feed data (instant)');
+      feedListModel = _cachedNewFeed!;
+      _cachedNewFeed = null;
+      isLoading = false;
+      hasNewPosts = false;
+      notifyListeners();
+      // Persist to disk for next app launch
+      _saveFeedToCache(jsonEncode(feedListModel.toJson()));
+    } else {
+      debugPrint('applyNewPosts: no cache, falling back to fetchPosts');
+      fetchPosts(isEvent: true);
+    }
+  }
+
   Future fetchPosts({bool isEvent = false}) async {
     if (Params.UserToken != "") {
+      // Debounce: skip if a fetch started less than 2 seconds ago
+      final now = DateTime.now();
+      if (_lastFetchStartTime != null &&
+          now.difference(_lastFetchStartTime!) < const Duration(seconds: 2)) {
+        debugPrint("fetchPosts skipped — debounce (too soon)");
+        return;
+      }
+      _lastFetchStartTime = now;
       try {
         if (isEvent == false) {
           isLoading = true;
@@ -113,24 +211,19 @@ class FeedModel extends ChangeNotifier {
 
         if (response.statusCode == 200) {
           feedListModel = FeedListModel.fromJson(decodeData);
-          if (isEvent == false) {
-            isLoading = false;
-          }
+          isLoading = false;
           notifyListeners();
+          // Save to disk cache for instant startup
+          _saveFeedToCache(result.body);
         } else {
-          if (isEvent == false) {
-            isLoading = false;
-          }
+          isLoading = false;
           notifyListeners();
         }
       } catch (e) {
         debugPrint("-----------------------------DEBUG ERROR $e");
-        if (isEvent == false) {
-          isLoading = false;
-        }
-
+        isLoading = false;
+        _lastFetchStartTime = null; // Allow immediate retry on error
         notifyListeners();
-        rethrow;
       }
     }
   }

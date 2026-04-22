@@ -495,10 +495,13 @@ class _MyAppState extends State<MyApp> with SingleTickerProviderStateMixin, Widg
       // _feedModel.clearFeedData();
       // _feedModel.page = 1;
 
-      // 2. Clear Flutter's global image cache
-      PaintingBinding.instance.imageCache.clear();
-      PaintingBinding.instance.imageCache.clearLiveImages();
-      debugPrint("Image cache cleared.");
+      // 2. DO NOT clear Flutter's image cache on pause.
+      //    Wiping the cache forces every visible feed image to redecode on
+      //    resume, which causes the feed to flash/jump and looks like the
+      //    scroll position skipped. The OS will reclaim memory if it needs to.
+      // PaintingBinding.instance.imageCache.clear();
+      // PaintingBinding.instance.imageCache.clearLiveImages();
+      debugPrint("Image cache preserved across pause/resume.");
 
       if (_feedModel.isHomeScreenVisible) {
         // Already on the home screen, just refresh the data.
@@ -516,9 +519,14 @@ class _MyAppState extends State<MyApp> with SingleTickerProviderStateMixin, Widg
         debugPrint("Resuming from another screen. No navigation action taken.");
       }
     } else if (state == AppLifecycleState.resumed) {
-      // The app has returned to the foreground — silent refresh (no loading spinner).
-      debugPrint("App is resumed.");
-      _feedModel.fetchPosts(isEvent: true);
+      // The app has returned to the foreground.
+      // DO NOT call _feedModel.fetchPosts() here. HomeScreen owns the resume
+      // refresh: its own didChangeAppLifecycleState restarts the 2-min auto-
+      // refresh timer, which uses checkForNewPosts() / applyNewPosts() to
+      // update the feed without replacing the list or resetting scroll.
+      // Calling fetchPosts(isEvent: true) here additionally would replace the
+      // entire feedListModel and visibly skip the user's scroll position.
+      debugPrint("App is resumed. Feed refresh delegated to HomeScreen.");
     }
   }
 }

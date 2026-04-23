@@ -30,6 +30,8 @@ class FeedModel extends ChangeNotifier {
   DateTime? _lastFetchStartTime;
   FeedListModel? _cachedNewFeed;
   int page = 1;
+  bool hasMore = true;
+  static const int perPage = 25;
 
   FeedListModel feedListModel = FeedListModel();
   FeedListModel viewFeedListModel = FeedListModel();
@@ -195,12 +197,15 @@ class FeedModel extends ChangeNotifier {
           isLoading = true;
           print("isLoading set to true");
         }
+        // Reset pagination state on a fresh first-page fetch
+        page = 1;
+        hasMore = true;
         print("Fetch Posts Called");
         notifyListeners();
         var headers = {
           'Authorization': 'Bearer ${Params.UserToken}',
         };
-        var request = http.Request('GET', Uri.parse("${ApiEndPoints.feed}?page=1"));
+        var request = http.Request('GET', Uri.parse("${ApiEndPoints.feed}?page=1&per_page=$perPage"));
 
         request.headers.addAll(headers);
 
@@ -211,6 +216,7 @@ class FeedModel extends ChangeNotifier {
 
         if (response.statusCode == 200) {
           feedListModel = FeedListModel.fromJson(decodeData);
+          hasMore = feedListModel.data?.nextPageUrl != null;
           isLoading = false;
           notifyListeners();
           // Save to disk cache for instant startup
@@ -261,11 +267,12 @@ class FeedModel extends ChangeNotifier {
   }
 
   Future fetchMorePosts(int page) async {
+    if (!hasMore) return;
     try {
       var headers = {
         'Authorization': 'Bearer ${Params.UserToken}',
       };
-      var request = http.Request('GET', Uri.parse("${ApiEndPoints.feed}?page=$page"));
+      var request = http.Request('GET', Uri.parse("${ApiEndPoints.feed}?page=$page&per_page=$perPage"));
 
       request.headers.addAll(headers);
 
@@ -279,7 +286,14 @@ class FeedModel extends ChangeNotifier {
 
         if (feed.data != null && feed.data!.data != null) {
           feedListModel.data!.data!.addAll(feed.data!.data!);
+          // Keep paginator metadata fresh so hasMore reflects the new page
+          feedListModel.data!.currentPage = feed.data!.currentPage;
+          feedListModel.data!.nextPageUrl = feed.data!.nextPageUrl;
+          feedListModel.data!.lastPage = feed.data!.lastPage;
+          hasMore = feed.data!.nextPageUrl != null;
           notifyListeners();
+        } else {
+          hasMore = false;
         }
       }
     } catch (e) {

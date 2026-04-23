@@ -36,23 +36,44 @@ class _FeedScreenState extends State<FeedScreen> with AutomaticKeepAliveClientMi
   @override
   bool get wantKeepAlive => true;
 
+  @override
+  void dispose() {
+    scrollController.removeListener(_fetchMorePost);
+    scrollController.dispose();
+    super.dispose();
+  }
+
   _fetchMorePost() {
-    if (scrollController.offset == scrollController.position.maxScrollExtent && provider.isLoadingMorePost == false) {
+    if (!scrollController.hasClients) return;
+    final position = scrollController.position;
+    // Prefetch ~600px before the bottom for a smooth, FB-like experience.
+    final triggerOffset = position.maxScrollExtent - 600;
+    if (position.pixels >= triggerOffset &&
+        provider.isLoadingMorePost == false &&
+        provider.hasMore) {
       setState(() {
         provider.isLoadingMorePost = true;
       });
       provider.page += 1;
       provider.fetchMorePosts(provider.page).then((value) {
+        if (!mounted) return;
+        setState(() {
+          provider.isLoadingMorePost = false;
+        });
+      }).catchError((_) {
+        if (!mounted) return;
+        // Roll back the page bump so the next scroll re-attempts the same page.
+        provider.page = (provider.page - 1).clamp(1, 1 << 30);
         setState(() {
           provider.isLoadingMorePost = false;
         });
       });
-      setState(() {});
     }
   }
 
   @override
   Widget build(BuildContext context) {
+    super.build(context);
     return Scaffold(
       // backgroundColor: const Color(0xFFE1EBEC),
       backgroundColor: Colors.white,
@@ -132,57 +153,67 @@ class _FeedScreenState extends State<FeedScreen> with AutomaticKeepAliveClientMi
                             ],
                           ),
                         )
-                      : ListView(
-                          padding: EdgeInsets.zero,
-                          shrinkWrap: true,
-                          children: [
-                            Row(
-                              mainAxisAlignment: MainAxisAlignment.center,
-                              children: [
-                                GestureDetector(
-                                  onTap: () {
-                                    Get.to(() => const UploadFeed());
-                                  },
-                                  child: Container(
-                                    margin: const EdgeInsets.only(top: 5),
-                                    padding: const EdgeInsets.all(7),
-                                    decoration: BoxDecoration(
-                                        color: const Color(0xFF0BA7C1), borderRadius: BorderRadius.circular(8)),
-                                    child: Text(
-                                      "Upload".tr,
-                                      style: textStyleWorkSense(
-                                          fontSize: 14, color: Colors.white, weight: FontWeight.bold),
+                      : Builder(builder: (context) {
+                          final items = provider.feedListModel.data!.data!;
+                          // +1 for header (Upload button), +1 for footer (loader / end).
+                          final itemCount = items.length + 2;
+                          return ListView.builder(
+                            controller: scrollController,
+                            padding: EdgeInsets.zero,
+                            physics: const AlwaysScrollableScrollPhysics(),
+                            cacheExtent: 1200,
+                            itemCount: itemCount,
+                            itemBuilder: (context, index) {
+                              if (index == 0) {
+                                return Row(
+                                  mainAxisAlignment: MainAxisAlignment.center,
+                                  children: [
+                                    GestureDetector(
+                                      onTap: () {
+                                        Get.to(() => const UploadFeed());
+                                      },
+                                      child: Container(
+                                        margin: const EdgeInsets.only(top: 5),
+                                        padding: const EdgeInsets.all(7),
+                                        decoration: BoxDecoration(
+                                            color: const Color(0xFF0BA7C1),
+                                            borderRadius: BorderRadius.circular(8)),
+                                        child: Text(
+                                          "Upload".tr,
+                                          style: textStyleWorkSense(
+                                              fontSize: 14, color: Colors.white, weight: FontWeight.bold),
+                                        ),
+                                      ),
                                     ),
-                                  ),
-                                ),
-                              ],
-                            ),
-                            ListView.builder(
-                              padding: EdgeInsets.zero,
-                              // controller: scrollController,
-                              physics: const NeverScrollableScrollPhysics(),
-                              shrinkWrap: true,
-                              itemCount: provider.feedListModel.data!.data!.length + 1,
-                              itemBuilder: (context, index) {
-                                if (index < provider.feedListModel.data!.data!.length) {
-                                  return FeedTile(
-                                    index: index,
-                                    isVisible: visibleTextIndex == index,
-                                    onButtonTap: () {
-                                      setState(() {
-                                        visibleTextIndex = visibleTextIndex == index ? -1 : index;
-                                      });
-                                    },
-                                  );
-                                } else if (provider.isLoadingMorePost) {
-                                  return const Center(
+                                  ],
+                                );
+                              }
+                              final dataIndex = index - 1;
+                              if (dataIndex < items.length) {
+                                return FeedTile(
+                                  index: dataIndex,
+                                  isVisible: visibleTextIndex == dataIndex,
+                                  onButtonTap: () {
+                                    setState(() {
+                                      visibleTextIndex =
+                                          visibleTextIndex == dataIndex ? -1 : dataIndex;
+                                    });
+                                  },
+                                );
+                              }
+                              // Footer
+                              if (provider.isLoadingMorePost) {
+                                return const Padding(
+                                  padding: EdgeInsets.symmetric(vertical: 16),
+                                  child: Center(
                                     child: CircularProgressIndicator(color: baseColor),
-                                  );
-                                } else {}
-                              },
-                            ),
-                          ],
-                        )
+                                  ),
+                                );
+                              }
+                              return const SizedBox(height: 24);
+                            },
+                          );
+                        })
                 ],
               );
       }),

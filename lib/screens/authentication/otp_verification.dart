@@ -4,6 +4,7 @@ import 'package:firebase_auth/firebase_auth.dart';
 import 'package:flutter/material.dart';
 import 'package:get/get.dart';
 import 'package:infosha/Controller/Viewmodel/userviewmodel.dart';
+import 'package:infosha/config/const.dart';
 import 'package:infosha/screens/home/home_screen.dart';
 import 'package:infosha/screens/hscreen/termsandConditions.dart';
 import 'package:infosha/utils/error_boundary.dart';
@@ -288,6 +289,21 @@ class _OTPVerificationState extends State<OTPVerification> {
                 Consumer<UserViewModel>(builder: (context, provider, child) {
                   return CustomButton(
                     () {
+                      // LOCAL DEV BYPASS: skip OTP verification entirely.
+                      // Controlled by kBypassOtpForLocalTest in lib/config/const.dart.
+                      // This block MUST be removed / flag disabled for production.
+                      if (kBypassOtpForLocalTest) {
+                        if (widget.isChangeNumber == true) {
+                          provider.newNumber(widget.phoneNumber).then((value) {
+                            if (value) {
+                              Get.offAll(() => const HomeScreen());
+                            }
+                          });
+                        } else {
+                          _submitOTP();
+                        }
+                        return;
+                      }
                       if (formKey.currentState!.validate()) {
                         if (provider.isOTPValidation == false) {
                           if (widget.phoneNumber.startsWith("+995")) {

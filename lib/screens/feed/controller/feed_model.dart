@@ -31,7 +31,7 @@ class FeedModel extends ChangeNotifier {
   FeedListModel? _cachedNewFeed;
   int page = 1;
   bool hasMore = true;
-  static const int perPage = 25;
+  static const int perPage = 10;
 
   FeedListModel feedListModel = FeedListModel();
   FeedListModel viewFeedListModel = FeedListModel();
@@ -221,6 +221,9 @@ class FeedModel extends ChangeNotifier {
           notifyListeners();
           // Save to disk cache for instant startup
           _saveFeedToCache(result.body);
+          // Spec step 2: as soon as page 1 arrives, IMMEDIATELY fire page 2
+          // in the background. Fire-and-forget — errors swallowed inside.
+          prefetchNext();
         } else {
           isLoading = false;
           notifyListeners();
@@ -263,6 +266,41 @@ class FeedModel extends ChangeNotifier {
       isViewLoading = false;
       notifyListeners();
       rethrow;
+    }
+  }
+
+  /// Public entry point used by the scroll listener (and the initial-load
+  /// path) to silently fetch the NEXT page in the background. Idempotent —
+  /// concurrent calls are dropped via [isLoadingMorePost]. Always loads at
+  /// most one page ahead, so memory stays bounded regardless of how fast
+  /// the user scrolls.
+  ///
+  /// Spec mapping:
+  ///  - Step 2: called right after page 1 arrives → fetches page 2.
+  ///  - Step 6: called by scroll listener when user nears end of loaded
+  ///    data → fetches the next page (3, 4, 5, …) in background.
+  void prefetchNext() {
+    // Don't await — fire-and-forget so the caller (UI scroll callback) is
+    // never blocked by network latency.
+    // ignore: discarded_futures
+    _prefetchNextPage();
+  }
+
+  Future<void> _prefetchNextPage() async {
+    if (!hasMore || isLoadingMorePost) return;
+    isLoadingMorePost = true;
+    page += 1;
+    notifyListeners();
+    final attemptedPage = page;
+    try {
+      await fetchMorePosts(attemptedPage);
+    } catch (e) {
+      // Roll back so the next scroll trigger re-attempts the same page
+      page = (attemptedPage - 1).clamp(1, 1 << 30);
+      debugPrint('Prefetch failed for page $attemptedPage: $e');
+    } finally {
+      isLoadingMorePost = false;
+      notifyListeners();
     }
   }
 

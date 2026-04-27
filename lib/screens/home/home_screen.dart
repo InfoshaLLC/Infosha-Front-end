@@ -180,20 +180,16 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
       providerFeed.applyNewPosts();
     }
 
-    if (scrollController.position.pixels >= scrollController.position.maxScrollExtent - 800 && !isLoadingMorePost) {
-      // Don't fetch beyond the last page
-      final lastPage = providerFeed.feedListModel.data?.lastPage ?? 1;
-      if (providerFeed.page >= lastPage) return;
-
-      setState(() {
-        isLoadingMorePost = true;
-      });
-      providerFeed.page += 1;
-      providerFeed.fetchMorePosts(providerFeed.page).whenComplete(() {
-        if (mounted) {
-          setState(() => isLoadingMorePost = false);
-        }
-      });
+    // Spec step 6: silently fire next page in background ~1500px before bottom.
+    // Delegate everything to FeedModel.prefetchNext() — it owns the page bump,
+    // concurrency guard, and rollback-on-error logic. Using `hasMore` (driven
+    // by `next_page_url`) instead of `lastPage`, because the backend now uses
+    // simplePaginate which does NOT return `last_page`.
+    if (scrollController.position.pixels >=
+            scrollController.position.maxScrollExtent - 1500 &&
+        providerFeed.hasMore &&
+        !providerFeed.isLoadingMorePost) {
+      providerFeed.prefetchNext();
     }
   }
 

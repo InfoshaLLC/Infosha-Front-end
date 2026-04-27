@@ -7,6 +7,11 @@ class Params {
   static String loginTime = "null";
 }
 
+// LOCAL DEV ONLY: when true, the OTP verification screen skips the
+// SMS/Firebase verify step and directly proceeds as if the OTP was correct.
+// MUST BE SET TO false BEFORE ANY PRODUCTION BUILD.
+const bool kBypassOtpForLocalTest = true;
+
 const String termscondition = '''
 The goal of multi-billion-dollar corporation Infosha is to help you find anyone’s phone number in the world. Infosha Corporation has prepared a privacy policy that is as clear as possible so that you understand how the application works. Please, read it carefully and use the app only if it is clear to you and if you agree to the terms and conditions completely. If you, as a customer see any issue regarding our privacy policy and terms and conditions, please refrain yourself from using our services. if you have additional questions, contact us at Support@Infosha.org or InfoshaCorporation@gmail.com
 \n1. Terms and Conditions

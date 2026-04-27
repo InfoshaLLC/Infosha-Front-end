@@ -46,28 +46,16 @@ class _FeedScreenState extends State<FeedScreen> with AutomaticKeepAliveClientMi
   _fetchMorePost() {
     if (!scrollController.hasClients) return;
     final position = scrollController.position;
-    // Prefetch ~600px before the bottom for a smooth, FB-like experience.
-    final triggerOffset = position.maxScrollExtent - 600;
+    // Spec step 6: when the user nears the end of the currently-loaded data
+    // (about ~1500px before the absolute bottom — roughly while they're
+    // still reading the last visible page), silently fire the next page in
+    // the background. The provider guards against concurrent calls and
+    // bounds memory at one page ahead.
+    final triggerOffset = position.maxScrollExtent - 1500;
     if (position.pixels >= triggerOffset &&
-        provider.isLoadingMorePost == false &&
-        provider.hasMore) {
-      setState(() {
-        provider.isLoadingMorePost = true;
-      });
-      provider.page += 1;
-      provider.fetchMorePosts(provider.page).then((value) {
-        if (!mounted) return;
-        setState(() {
-          provider.isLoadingMorePost = false;
-        });
-      }).catchError((_) {
-        if (!mounted) return;
-        // Roll back the page bump so the next scroll re-attempts the same page.
-        provider.page = (provider.page - 1).clamp(1, 1 << 30);
-        setState(() {
-          provider.isLoadingMorePost = false;
-        });
-      });
+        provider.hasMore &&
+        provider.isLoadingMorePost == false) {
+      provider.prefetchNext();
     }
   }
 

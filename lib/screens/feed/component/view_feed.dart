@@ -1133,12 +1133,8 @@ class _ViewFeedState extends State<ViewFeed> {
 
                   // ---- CALL API ----
                   provider.addFeedReaction(model.id.toString(), name).then((countFromApi) {
-                    // If API response is valid → set correct count
                     setState(() {
-                      // model.totalReactionCount = countFromApi;
-                      if (countFromApi >= model.totalReactionCount!) {
                         model.totalReactionCount = countFromApi;
-                      }
                     });
                   }).catchError((_) {
                     // ---- API FAILED → ROLLBACK ----

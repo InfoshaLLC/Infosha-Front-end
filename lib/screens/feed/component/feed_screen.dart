@@ -28,9 +28,24 @@ class _FeedScreenState extends State<FeedScreen> with AutomaticKeepAliveClientMi
 
     Future.microtask(() => context.read<FeedModel>().fetchPosts());
 
-    scrollController.addListener(_fetchMorePost);
+    // Safety-net prefetch trigger: fire when within 600px of bottom.
+    // Complements the index-based trigger inside itemBuilder so a fetch can
+    // be kicked off even when no new items get rebuilt (e.g. after a page
+    // lands and the user is already past the index threshold).
+    scrollController.addListener(_onScrollPrefetch);
 
     super.initState();
+  }
+
+  void _onScrollPrefetch() {
+    if (!scrollController.hasClients) return;
+    final pos = scrollController.position;
+    if (pos.maxScrollExtent <= 0) return;
+    final remaining = pos.maxScrollExtent - pos.pixels;
+    if (remaining > 600) return;
+    if (!provider.hasMore) return;
+    if (provider.lastLoadError != null) return;
+    provider.ensureNextPagesLoaded();
   }
 
   @override
@@ -38,25 +53,9 @@ class _FeedScreenState extends State<FeedScreen> with AutomaticKeepAliveClientMi
 
   @override
   void dispose() {
-    scrollController.removeListener(_fetchMorePost);
+    scrollController.removeListener(_onScrollPrefetch);
     scrollController.dispose();
     super.dispose();
-  }
-
-  _fetchMorePost() {
-    if (!scrollController.hasClients) return;
-    final position = scrollController.position;
-    // Spec step 6: when the user nears the end of the currently-loaded data
-    // (about ~1500px before the absolute bottom — roughly while they're
-    // still reading the last visible page), silently fire the next page in
-    // the background. The provider guards against concurrent calls and
-    // bounds memory at one page ahead.
-    final triggerOffset = position.maxScrollExtent - 1500;
-    if (position.pixels >= triggerOffset &&
-        provider.hasMore &&
-        provider.isLoadingMorePost == false) {
-      provider.prefetchNext();
-    }
   }
 
   @override
@@ -149,7 +148,7 @@ class _FeedScreenState extends State<FeedScreen> with AutomaticKeepAliveClientMi
                             controller: scrollController,
                             padding: EdgeInsets.zero,
                             physics: const AlwaysScrollableScrollPhysics(),
-                            cacheExtent: 1200,
+                            cacheExtent: 2000,
                             itemCount: itemCount,
                             itemBuilder: (context, index) {
                               if (index == 0) {
@@ -178,6 +177,18 @@ class _FeedScreenState extends State<FeedScreen> with AutomaticKeepAliveClientMi
                               }
                               final dataIndex = index - 1;
                               if (dataIndex < items.length) {
+                                // Index-based prefetch trigger (Facebook-style).
+                                // Fires deterministically as the user nears the
+                                // end of the loaded list — immune to scroll
+                                // velocity, item heights, and maxScrollExtent
+                                // shifts that broke the old pixel-based trigger.
+                                if (provider.hasMore &&
+                                    provider.lastLoadError == null &&
+                                    dataIndex >= items.length - FeedModel.prefetchThreshold) {
+                                  WidgetsBinding.instance.addPostFrameCallback((_) {
+                                    provider.ensureNextPagesLoaded();
+                                  });
+                                }
                                 return FeedTile(
                                   index: dataIndex,
                                   isVisible: visibleTextIndex == dataIndex,
@@ -189,12 +200,56 @@ class _FeedScreenState extends State<FeedScreen> with AutomaticKeepAliveClientMi
                                   },
                                 );
                               }
-                              // Footer
+                              // Footer: loading spinner / retry / end-of-feed marker.
                               if (provider.isLoadingMorePost) {
                                 return const Padding(
                                   padding: EdgeInsets.symmetric(vertical: 16),
                                   child: Center(
                                     child: CircularProgressIndicator(color: baseColor),
+                                  ),
+                                );
+                              }
+                              if (provider.lastLoadError != null) {
+                                return Padding(
+                                  padding: const EdgeInsets.symmetric(vertical: 16, horizontal: 24),
+                                  child: Center(
+                                    child: Column(
+                                      children: [
+                                        Text(
+                                          "Couldn't load more posts",
+                                          style: GoogleFonts.workSans(
+                                            color: Colors.black87,
+                                            fontSize: 14,
+                                          ),
+                                        ),
+                                        const SizedBox(height: 8),
+                                        TextButton(
+                                          onPressed: () => provider.retryLoadMore(),
+                                          child: Text(
+                                            'Tap to retry',
+                                            style: GoogleFonts.workSans(
+                                              color: baseColor,
+                                              fontSize: 14,
+                                              fontWeight: FontWeight.w600,
+                                            ),
+                                          ),
+                                        ),
+                                      ],
+                                    ),
+                                  ),
+                                );
+                              }
+                              if (!provider.hasMore && items.isNotEmpty) {
+                                return Padding(
+                                  padding: const EdgeInsets.symmetric(vertical: 24),
+                                  child: Center(
+                                    child: Text(
+                                      "You're all caught up",
+                                      style: GoogleFonts.workSans(
+                                        color: Colors.black54,
+                                        fontSize: 14,
+                                      ),
+                                    ),
                                   ),
                                 );
                               }

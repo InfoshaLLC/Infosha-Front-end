@@ -1,5 +1,6 @@
 import 'dart:ffi';
 import 'dart:convert';
+import 'dart:io' show HttpException;
 import 'package:get/get.dart';
 import 'package:flutter/material.dart';
 import 'package:http/http.dart' as http;
@@ -21,7 +22,6 @@ class FeedModel extends ChangeNotifier {
   bool isLoading = true;
   bool isViewLoading = false;
   bool isAddComment = false;
-  bool isLoadingMorePost = false;
   bool isReactionOfComment = false;
   bool isHomeScreenVisible = false;
   bool isProfileScreenVisible = false;
@@ -32,6 +32,22 @@ class FeedModel extends ChangeNotifier {
   int page = 1;
   bool hasMore = true;
   static const int perPage = 10;
+
+  // ---- Robust pagination state (Facebook-style) ----
+  // Per-page in-flight set: dedupes concurrent requests for the same page.
+  final Set<int> _inFlightPages = <int>{};
+  // Last error from a load-more attempt (after retries exhausted). When set,
+  // the footer shows a "Tap to retry" affordance.
+  String? lastLoadError;
+  // Distance (in items) from the end of the loaded list at which we should
+  // start prefetching the next page. Tuned for ~1 page of lookahead so the
+  // user almost never sees a spinner while scrolling steadily.
+  static const int prefetchThreshold = 8;
+
+  /// Derived: true while ANY page request is in flight. Replaces the old
+  /// boolean flag so the UI footer always reflects real network state and
+  /// can never get "stuck" if a request silently throws.
+  bool get isLoadingMorePost => _inFlightPages.isNotEmpty;
 
   FeedListModel feedListModel = FeedListModel();
   FeedListModel viewFeedListModel = FeedListModel();
@@ -200,6 +216,8 @@ class FeedModel extends ChangeNotifier {
         // Reset pagination state on a fresh first-page fetch
         page = 1;
         hasMore = true;
+        _inFlightPages.clear();
+        lastLoadError = null;
         print("Fetch Posts Called");
         notifyListeners();
         var headers = {
@@ -269,74 +287,125 @@ class FeedModel extends ChangeNotifier {
     }
   }
 
-  /// Public entry point used by the scroll listener (and the initial-load
-  /// path) to silently fetch the NEXT page in the background. Idempotent —
-  /// concurrent calls are dropped via [isLoadingMorePost]. Always loads at
-  /// most one page ahead, so memory stays bounded regardless of how fast
-  /// the user scrolls.
+  /// Index-based, self-healing prefetch entry point. Called from the
+  /// `ListView.builder` itemBuilder when the user nears the end of loaded
+  /// items. Deterministic regardless of scroll velocity, item heights, or
+  /// `maxScrollExtent` shifts (the root cause of the previous "stops at
+  /// page 3" bug).
   ///
-  /// Spec mapping:
-  ///  - Step 2: called right after page 1 arrives → fetches page 2.
-  ///  - Step 6: called by scroll listener when user nears end of loaded
-  ///    data → fetches the next page (3, 4, 5, …) in background.
-  void prefetchNext() {
-    // Don't await — fire-and-forget so the caller (UI scroll callback) is
-    // never blocked by network latency.
-    // ignore: discarded_futures
-    _prefetchNextPage();
-  }
-
-  Future<void> _prefetchNextPage() async {
-    if (!hasMore || isLoadingMorePost) return;
-    isLoadingMorePost = true;
-    page += 1;
-    notifyListeners();
-    final attemptedPage = page;
-    try {
-      await fetchMorePosts(attemptedPage);
-    } catch (e) {
-      // Roll back so the next scroll trigger re-attempts the same page
-      page = (attemptedPage - 1).clamp(1, 1 << 30);
-      debugPrint('Prefetch failed for page $attemptedPage: $e');
-    } finally {
-      isLoadingMorePost = false;
-      notifyListeners();
+  /// `lookahead` controls how many additional pages beyond the current one
+  /// to keep buffered. Default 1 keeps memory bounded yet smooth.
+  void ensureNextPagesLoaded({int lookahead = 1, bool forceRetry = false}) {
+    if (forceRetry) lastLoadError = null;
+    if (!hasMore) {
+      debugPrint('[feed] ensureNextPagesLoaded skipped — hasMore=false page=$page');
+      return;
+    }
+    final currentPage = page;
+    final targetPage = currentPage + lookahead;
+    debugPrint('[feed] ensureNextPagesLoaded page=$currentPage → request ${currentPage + 1}..$targetPage inFlight=$_inFlightPages');
+    for (var p = currentPage + 1; p <= targetPage; p++) {
+      // ignore: discarded_futures
+      _loadPage(p);
     }
   }
 
-  Future fetchMorePosts(int page) async {
+  /// Backwards-compatible alias kept so any older call sites still work.
+  void prefetchNext() => ensureNextPagesLoaded();
+
+  /// Manual retry hook for the footer's "Tap to retry" affordance.
+  void retryLoadMore() {
+    lastLoadError = null;
+    notifyListeners();
+    ensureNextPagesLoaded(forceRetry: true);
+  }
+
+  /// Loads a single page with per-page dedupe and capped exponential-backoff
+  /// retry on transient errors. Server `next_page_url` is the single source
+  /// of truth for `hasMore`.
+  Future<void> _loadPage(int targetPage) async {
     if (!hasMore) return;
-    try {
-      var headers = {
-        'Authorization': 'Bearer ${Params.UserToken}',
-      };
-      var request = http.Request('GET', Uri.parse("${ApiEndPoints.feed}?page=$page&per_page=$perPage"));
+    if (_inFlightPages.contains(targetPage)) return;
+    // Don't refetch a page we've already merged.
+    if (targetPage <= page) return;
+    _inFlightPages.add(targetPage);
+    notifyListeners();
 
-      request.headers.addAll(headers);
+    const maxAttempts = 3;
+    const backoffsMs = [500, 1000, 2000];
+    Object? lastError;
 
-      http.StreamedResponse response = await request.send();
-      var result = await http.Response.fromStream(response);
-      final decodeData = jsonDecode(result.body);
-      print("fetchMorePosts ==> $decodeData");
-
-      if (response.statusCode == 200) {
-        FeedListModel feed = FeedListModel.fromJson(decodeData);
-
-        if (feed.data != null && feed.data!.data != null) {
-          feedListModel.data!.data!.addAll(feed.data!.data!);
-          // Keep paginator metadata fresh so hasMore reflects the new page
-          feedListModel.data!.currentPage = feed.data!.currentPage;
-          feedListModel.data!.nextPageUrl = feed.data!.nextPageUrl;
-          feedListModel.data!.lastPage = feed.data!.lastPage;
-          hasMore = feed.data!.nextPageUrl != null;
+    for (var attempt = 0; attempt < maxAttempts; attempt++) {
+      try {
+        final ok = await fetchMorePosts(targetPage);
+        if (ok) {
+          lastLoadError = null;
+          _inFlightPages.remove(targetPage);
           notifyListeners();
-        } else {
-          hasMore = false;
+          return;
+        }
+        // ok=false means the server responded but with empty/null data —
+        // treat as end-of-feed, do NOT retry.
+        _inFlightPages.remove(targetPage);
+        notifyListeners();
+        return;
+      } catch (e) {
+        lastError = e;
+        debugPrint('Page $targetPage attempt ${attempt + 1} failed: $e');
+        if (attempt + 1 < maxAttempts) {
+          await Future.delayed(Duration(milliseconds: backoffsMs[attempt]));
         }
       }
-    } catch (e) {
-      rethrow;
     }
+
+    // All retries exhausted — surface error so footer can offer retry.
+    lastLoadError = lastError?.toString() ?? 'Failed to load more posts';
+    _inFlightPages.remove(targetPage);
+    notifyListeners();
+  }
+
+  /// Performs the network request for a single page and merges the result
+  /// into the in-memory list. Returns true on a successful merge, false on
+  /// an empty/end-of-feed response. Throws on transient/network errors so
+  /// the caller (`_loadPage`) can apply retry/backoff.
+  Future<bool> fetchMorePosts(int targetPage) async {
+    if (!hasMore) return false;
+    final headers = {
+      'Authorization': 'Bearer ${Params.UserToken}',
+    };
+    final request = http.Request(
+      'GET',
+      Uri.parse("${ApiEndPoints.feed}?page=$targetPage&per_page=$perPage"),
+    );
+    request.headers.addAll(headers);
+
+    final response = await request.send();
+    final result = await http.Response.fromStream(response);
+
+    if (response.statusCode != 200) {
+      throw HttpException('HTTP ${response.statusCode} for page $targetPage');
+    }
+
+    final decodeData = jsonDecode(result.body);
+    debugPrint('fetchMorePosts page=$targetPage ok');
+    final feed = FeedListModel.fromJson(decodeData);
+
+    final newItems = feed.data?.data;
+    if (newItems == null || newItems.isEmpty) {
+      // Server says no more rows on this page → end of feed.
+      hasMore = false;
+      return false;
+    }
+
+    feedListModel.data!.data!.addAll(newItems);
+    feedListModel.data!.currentPage = feed.data!.currentPage;
+    feedListModel.data!.nextPageUrl = feed.data!.nextPageUrl;
+    feedListModel.data!.lastPage = feed.data!.lastPage;
+    // Server `next_page_url` is the single source of truth.
+    hasMore = feed.data!.nextPageUrl != null;
+    page = targetPage;
+    notifyListeners();
+    return true;
   }
 
   Future fetchPostsData(String id) async {
@@ -637,7 +706,7 @@ class FeedModel extends ChangeNotifier {
   }
 
   ///used to react on feed
-  Future<int> addFeedReaction(String commentId, String name) async {
+  Future<int?> addFeedReaction(String commentId, String name) async {
     try {
       var headers = {
         'Accept': 'application/json',
@@ -654,12 +723,14 @@ class FeedModel extends ChangeNotifier {
 
       if (response.statusCode == 200) {
         debugPrint("addReaction ===> $commentId $decodeData");
-        return decodeData["data"]["reactionCount"];
-      } else {
-        return decodeData["data"]["reactionCount"];
+        return decodeData["data"]?["reactionCount"];
       }
+
+      debugPrint("addReaction failed ===> $commentId ${response.statusCode} $decodeData");
+      return null;
     } catch (e) {
-      return 0;
+      debugPrint("addReaction exception ===> $commentId $e");
+      return null;
     }
   }
 

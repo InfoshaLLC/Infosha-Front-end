@@ -58,6 +58,12 @@ class _FeedTileState extends State<FeedTile> with AutomaticKeepAliveClientMixin 
   String activeSubscriptionPlanName = '';
   bool isReactionCooldown = false;
 
+  /// Monotonic counter of reaction requests sent from this widget.
+  /// Only the latest in-flight request may write the count back, so a slow
+  /// older response cannot overwrite a newer optimistic value (avoids
+  /// 1 → 0 → 1 flicker when the user taps quickly).
+  int _reactionRequestSeq = 0;
+
   @override
   bool get wantKeepAlive => true;
 
@@ -1048,6 +1054,16 @@ class _FeedTileState extends State<FeedTile> with AutomaticKeepAliveClientMixin 
 
   int safeCount(int value) => value < 0 ? 0 : value;
 
+  int nextReactionCount(String? previousReactionName, String nextReactionName, int previousCount) {
+    if (previousReactionName == null) {
+      return previousCount + 1;
+    }
+    if (previousReactionName == nextReactionName) {
+      return safeCount(previousCount - 1);
+    }
+    return previousCount;
+  }
+
   voteContainer() {
     var model = provider.feedListModel.data!.data![widget.index];
     final String comment =
@@ -1160,26 +1176,36 @@ class _FeedTileState extends State<FeedTile> with AutomaticKeepAliveClientMixin 
                   String name = getReactionName(val.id);
 
                   final model = provider.feedListModel.data!.data![widget.index];
+                  final previousReactionName = model.reactionName;
+                  final previousReactionCount = model.totalReactionCount ?? 0;
+                  final isRemovingReaction = previousReactionName == name;
 
                   // Save previous states (for rollback)
                   final prevReactionId = selectedReactionId;
-                  final prevReactionName = model.reactionName;
+                  final prevReactionName = previousReactionName;
                   final prevReactionCount = model.totalReactionCount;
+                  final requestId = ++_reactionRequestSeq;
 
                   // ---- OPTIMISTIC UI UPDATE ----
                   setState(() {
-                    selectedReactionId = val.id;
-                    model.reactionName = name;
-                    model.totalReactionCount = prevReactionCount! + 1; // instant update
+                    selectedReactionId = isRemovingReaction ? -1 : val.id;
+                    model.reactionName = isRemovingReaction ? null : name;
+                    model.totalReactionCount = nextReactionCount(previousReactionName, name, previousReactionCount);
                   });
 
                   // ---- CALL API ----
                   provider.addFeedReaction(model.id.toString(), name).then((countFromApi) {
+                    if (countFromApi == null) {
+                      throw Exception("Failed to update reaction count");
+                    }
+                    if (requestId != _reactionRequestSeq) return; // a newer tap is in flight
+                    if (model.totalReactionCount == countFromApi) return; // already in sync
                     setState(() {
-                        model.totalReactionCount = countFromApi;
+                      model.totalReactionCount = countFromApi;
                     });
                   }).catchError((_) {
                     // ---- API FAILED → ROLLBACK ----
+                    if (requestId != _reactionRequestSeq) return;
                     setState(() {
                       selectedReactionId = prevReactionId;
                       model.reactionName = prevReactionName;
@@ -1216,23 +1242,29 @@ class _FeedTileState extends State<FeedTile> with AutomaticKeepAliveClientMixin 
                   final prevReactionId = selectedReactionId;
                   final prevReactionName = model.reactionName;
                   final prevReactionCount = model.totalReactionCount;
+                  final requestId = ++_reactionRequestSeq;
 
                   // User removes reaction
                   if (model.reactionName != null) {
                     // OPTIMISTIC UPDATE
                     setState(() {
-                      // selectedReactionId = -1;
+                      selectedReactionId = -1;
                       model.reactionName = null;
-                      // model.totalReactionCount = prevReactionCount! - 1;
-                      model.totalReactionCount = safeCount(prevReactionCount! - 1);
+                      model.totalReactionCount = safeCount((prevReactionCount ?? 0) - 1);
                     });
 
                     provider.addFeedReaction(model.id.toString(), prevReactionName!).then((countApi) {
+                      if (countApi == null) {
+                        throw Exception("Failed to remove reaction count");
+                      }
+                      if (requestId != _reactionRequestSeq) return;
+                      if (model.totalReactionCount == countApi) return;
                       setState(() {
                         model.totalReactionCount = countApi;
                       });
                     }).catchError((_) {
                       // ROLLBACK
+                      if (requestId != _reactionRequestSeq) return;
                       setState(() {
                         selectedReactionId = prevReactionId;
                         model.reactionName = prevReactionName;
@@ -1247,15 +1279,21 @@ class _FeedTileState extends State<FeedTile> with AutomaticKeepAliveClientMixin 
                     setState(() {
                       selectedReactionId = 0;
                       model.reactionName = newReaction;
-                      model.totalReactionCount = prevReactionCount! + 1;
+                      model.totalReactionCount = (prevReactionCount ?? 0) + 1;
                     });
 
                     provider.addFeedReaction(model.id.toString(), newReaction).then((countApi) {
+                      if (countApi == null) {
+                        throw Exception("Failed to add reaction count");
+                      }
+                      if (requestId != _reactionRequestSeq) return;
+                      if (model.totalReactionCount == countApi) return;
                       setState(() {
                         model.totalReactionCount = countApi;
                       });
                     }).catchError((_) {
                       // ROLLBACK
+                      if (requestId != _reactionRequestSeq) return;
                       setState(() {
                         selectedReactionId = prevReactionId;
                         model.reactionName = prevReactionName;

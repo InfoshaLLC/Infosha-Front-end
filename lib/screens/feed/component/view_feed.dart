@@ -54,6 +54,12 @@ class _ViewFeedState extends State<ViewFeed> {
   String loggedinUser = '';
   bool isSubscriptionActive = false;
   String activeSubscriptionPlanName = '';
+
+  /// Monotonic counter of reaction requests from this view. Only the latest
+  /// in-flight response is allowed to update the count, preventing flicker
+  /// (e.g. 1 → 0 → 1) when the user taps reactions in rapid succession.
+  int _reactionRequestSeq = 0;
+
   bool get _isVideo {
     final fileUrl = provider.viewFeedListModel.data?.data?.first.fileUrl;
     if (fileUrl == null) return false;
@@ -1022,6 +1028,16 @@ class _ViewFeedState extends State<ViewFeed> {
 
   int safeCount(int value) => value < 0 ? 0 : value;
 
+  int nextReactionCount(String? previousReactionName, String nextReactionName, int previousCount) {
+    if (previousReactionName == null) {
+      return previousCount + 1;
+    }
+    if (previousReactionName == nextReactionName) {
+      return safeCount(previousCount - 1);
+    }
+    return previousCount;
+  }
+
   voteContainer() {
     var model = provider.viewFeedListModel.data!.data![0];
     final String comment = provider.viewFeedListModel.data!.data![0].totalRepliesComment == 1 ? "comment" : "comments";
@@ -1118,26 +1134,36 @@ class _ViewFeedState extends State<ViewFeed> {
                   String name = getReactionName(val.id);
 
                   final model = provider.viewFeedListModel.data!.data![0];
+                  final previousReactionName = model.reactionName;
+                  final previousReactionCount = model.totalReactionCount ?? 0;
+                  final isRemovingReaction = previousReactionName == name;
 
                   // Save previous states (for rollback)
                   final prevReactionId = selectedReactionId;
-                  final prevReactionName = model.reactionName;
+                  final prevReactionName = previousReactionName;
                   final prevReactionCount = model.totalReactionCount;
+                  final requestId = ++_reactionRequestSeq;
 
                   // ---- OPTIMISTIC UI UPDATE ----
                   setState(() {
-                    selectedReactionId = val.id;
-                    model.reactionName = name;
-                    model.totalReactionCount = prevReactionCount! + 1; // instant update
+                    selectedReactionId = isRemovingReaction ? -1 : val.id;
+                    model.reactionName = isRemovingReaction ? null : name;
+                    model.totalReactionCount = nextReactionCount(previousReactionName, name, previousReactionCount);
                   });
 
                   // ---- CALL API ----
                   provider.addFeedReaction(model.id.toString(), name).then((countFromApi) {
+                    if (countFromApi == null) {
+                      throw Exception("Failed to update reaction count");
+                    }
+                    if (requestId != _reactionRequestSeq) return;
+                    if (model.totalReactionCount == countFromApi) return;
                     setState(() {
-                        model.totalReactionCount = countFromApi;
+                      model.totalReactionCount = countFromApi;
                     });
                   }).catchError((_) {
                     // ---- API FAILED → ROLLBACK ----
+                    if (requestId != _reactionRequestSeq) return;
                     setState(() {
                       selectedReactionId = prevReactionId;
                       model.reactionName = prevReactionName;
@@ -1174,6 +1200,7 @@ class _ViewFeedState extends State<ViewFeed> {
                   final prevReactionId = selectedReactionId;
                   final prevReactionName = model.reactionName;
                   final prevReactionCount = model.totalReactionCount;
+                  final requestId = ++_reactionRequestSeq;
 
                   // User removes reaction
                   if (model.reactionName != null) {
@@ -1181,16 +1208,21 @@ class _ViewFeedState extends State<ViewFeed> {
                     setState(() {
                       selectedReactionId = -1;
                       model.reactionName = null;
-                      // model.totalReactionCount = prevReactionCount! - 1;
-                      model.totalReactionCount = safeCount(prevReactionCount! - 1);
+                      model.totalReactionCount = safeCount((prevReactionCount ?? 0) - 1);
                     });
 
                     provider.addFeedReaction(model.id.toString(), prevReactionName!).then((countApi) {
+                      if (countApi == null) {
+                        throw Exception("Failed to remove reaction count");
+                      }
+                      if (requestId != _reactionRequestSeq) return;
+                      if (model.totalReactionCount == countApi) return;
                       setState(() {
                         model.totalReactionCount = countApi;
                       });
                     }).catchError((_) {
                       // ROLLBACK
+                      if (requestId != _reactionRequestSeq) return;
                       setState(() {
                         selectedReactionId = prevReactionId;
                         model.reactionName = prevReactionName;
@@ -1205,15 +1237,21 @@ class _ViewFeedState extends State<ViewFeed> {
                     setState(() {
                       selectedReactionId = 0;
                       model.reactionName = newReaction;
-                      model.totalReactionCount = prevReactionCount! + 1;
+                      model.totalReactionCount = (prevReactionCount ?? 0) + 1;
                     });
 
                     provider.addFeedReaction(model.id.toString(), newReaction).then((countApi) {
+                      if (countApi == null) {
+                        throw Exception("Failed to add reaction count");
+                      }
+                      if (requestId != _reactionRequestSeq) return;
+                      if (model.totalReactionCount == countApi) return;
                       setState(() {
                         model.totalReactionCount = countApi;
                       });
                     }).catchError((_) {
                       // ROLLBACK
+                      if (requestId != _reactionRequestSeq) return;
                       setState(() {
                         selectedReactionId = prevReactionId;
                         model.reactionName = prevReactionName;

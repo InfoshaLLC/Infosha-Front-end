@@ -162,6 +162,18 @@ class PusherService {
               var feedList = _feedModel.feedListModel.data?.data;
               if (feedList == null) return;
 
+              // Ignore self-broadcast echoes — the local optimistic update
+              // and the HTTP response already keep the UI in sync. Letting
+              // the pusher echo also rewrite the count causes a brief
+              // flicker (e.g. 1 → 0 → 1) on rapid taps.
+              final prefs = await SharedPreferences.getInstance();
+              final currentUserId = prefs.getString("Id");
+              final reactorId = data["user"]?["id"]?.toString();
+              if (currentUserId != null && reactorId != null && currentUserId == reactorId) {
+                debugPrint("Skipping self-broadcast feed_reaction for feed $feedId");
+                return;
+              }
+
               final index = feedList.indexWhere((item) => item.id == feedId);
               if (index != -1) {
                 var feed = feedList[index];
@@ -169,7 +181,9 @@ class PusherService {
                 if (data["counts"]?["reactionCount"] != null) {
                   feed.totalReactionCount = data["counts"]["reactionCount"];
                 }
-                if (data["reaction_name"] != null) {
+                if (data["action"] == "remove") {
+                  feed.reactionName = null;
+                } else if (data["reaction_name"] != null) {
                   feed.reactionName = data["reaction_name"];
                 }
 
